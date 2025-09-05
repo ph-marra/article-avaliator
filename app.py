@@ -12,8 +12,8 @@ from config import (
     RESULTS_SHEET_URL,
     AVALIADORES,
     ASPECTOS_AVALIACAO,
-    COLUNA_ORDENACAO_FALLBACK,
-    ORDEM_FALLBACK
+    COLUNAS_ORDENACAO_FALLBACK,
+    ORDENS_ORDENACAO_FALLBACK
 )
 
 # --- CONFIGURAÇÃO E AUTENTICAÇÃO ---
@@ -51,10 +51,13 @@ def get_sheet_as_df(client, sheet_url, sheet_name=None):
         st.error(f"Erro ao carregar a planilha '{sheet_url}'. Verifique a URL e as permissões de compartilhamento. Erro: {e}")
         return pd.DataFrame()
 
-def get_all_articles(client, sheet_url):
+@st.cache_data
+def get_all_articles(_client, sheet_url):
     """Carrega artigos de todas as abas de uma planilha."""
     try:
-        spreadsheet = client.open_by_url(sheet_url)
+        # Note que o primeiro argumento do cache é o _client, 
+        # o sublinhado é uma convenção para dizer ao cache para não "olhar" para ele
+        spreadsheet = _client.open_by_url(sheet_url)
         all_dfs = []
         for worksheet in spreadsheet.worksheets():
             data = worksheet.get_all_records()
@@ -65,13 +68,16 @@ def get_all_articles(client, sheet_url):
             st.warning("Nenhum dado encontrado na planilha de origem.")
             return pd.DataFrame()
 
-        # Garante que as colunas Title e Abstract existam
         full_df = pd.concat(all_dfs, ignore_index=True)
-        if "Title" not in full_df.columns or "Abstract" not in full_df.columns:
-            st.error("A planilha de origem deve conter as colunas 'Title' e 'Abstract'.")
+
+        must_exist = ['Title', 'Abstract'] + COLUNAS_ORDENACAO_FALLBACK
+        missing_cols = [col for col in must_exist if col not in full_df.columns]
+
+        if missing_cols:
+            st.error(f"As seguintes colunas obrigatórias não foram encontradas na planilha de origem: {missing_cols}")
             return pd.DataFrame()
             
-        return full_df[["Title", "Abstract", "Year"]].drop_duplicates(subset=["Title"])
+        return full_df.drop_duplicates(subset=["Title"])
     except Exception as e:
         st.error(f"Erro ao carregar a planilha de origem '{sheet_url}'. Erro: {e}")
         return pd.DataFrame()
@@ -122,8 +128,8 @@ def selecionar_proximo_artigo(avaliador_cpf, df_artigos, df_resultados):
     
     # Ordenar de acordo com a configuração
     df_ordenado = df_virgens.sort_values(
-        by=COLUNA_ORDENACAO_FALLBACK,
-        ascending=(ORDEM_FALLBACK.upper() == "ASC")
+        by=COLUNAS_ORDENACAO_FALLBACK,
+        ascending=ORDENS_ORDENACAO_FALLBACK
     )
     
     return df_ordenado.iloc[0]

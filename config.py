@@ -12,6 +12,7 @@ RESULTS_SHEET_URL = "https://docs.google.com/spreadsheets/d/160jjyY1tbn1TmzTeoqL
 # O CPF será usado como identificador único.
 AVALIADORES = {
     "10809607670": "Pedro Henrique Marra Araújo",
+    "78142440644": "Viviane Olímpia Marra",
     # "55566677788": "Nome do Avaliador 2",
     # Adicione mais avaliadores aqui no formato "CPF": "NOME"
 }
@@ -36,7 +37,10 @@ ASPECTOS_AVALIACAO = [
 ]
 
 # --- CONFIGURAÇÕES DA SELEÇÃO DE ARTIGOS ---
-# Usado quando nenhum artigo tem avaliações parciais.
-# Escolha uma coluna da sua planilha de artigos para ordenar.
-COLUNA_ORDENACAO_FALLBACK = "Year" # Pode ser "Title" ou outra coluna que exista
-ORDEM_FALLBACK = "ASC" # Pode ser "ASC" para ascendente ou "DESC" para descendente
+
+# Lista de colunas para ordenar. A primeira tem prioridade máxima.
+COLUNAS_ORDENACAO_FALLBACK = ["Year", "Citations"]
+
+# Lista de ordens correspondente. 
+# False = Descendente (DESC), True = Ascendente (ASC).
+ORDENS_ORDENACAO_FALLBACK = [False, True]
