@@ -1,12 +1,13 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import gspread
 from gspread_dataframe import set_with_dataframe
 from oauth2client.service_account import ServiceAccountCredentials
 import random
+import time
+from datetime import datetime
 
-# Importar configurações
+# Import configurations from config.py
 from config import (
     SOURCE_SHEET_URL,
     RESULTS_SHEET_URL,
@@ -16,11 +17,9 @@ from config import (
     ORDENS_ORDENACAO_FALLBACK
 )
 
-# --- CONFIGURAÇÃO E AUTENTICAÇÃO ---
+st.set_page_config(layout="wide", page_title="Article Evaluation Tool")
 
-st.set_page_config(layout="wide", page_title="Ferramenta de Avaliação de Artigos")
-
-# Define o escopo da API do Google
+# Defines the scope for the Google API
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
     'https://www.googleapis.com/auth/spreadsheets',
@@ -28,35 +27,31 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Cache para a conexão para não reconectar a cada interação
 @st.cache_resource
 def get_gspread_client():
-    """Conecta-se ao Google Sheets usando as credenciais."""
+    """Connects to Google Sheets using service account credentials."""
     creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
     client = gspread.authorize(creds)
     return client
 
 def get_sheet_as_df(client, sheet_url, sheet_name=None):
-    """Carrega uma aba específica (ou a primeira) de uma planilha como DataFrame."""
+    """Loads a specific sheet (or the first one) from a spreadsheet as a DataFrame."""
     try:
         sheet = client.open_by_url(sheet_url)
         if sheet_name:
             worksheet = sheet.worksheet(sheet_name)
         else:
-            worksheet = sheet.get_worksheet(0) # Pega a primeira aba por padrão
-        
+            worksheet = sheet.get_worksheet(0)
         data = worksheet.get_all_records()
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Erro ao carregar a planilha '{sheet_url}'. Verifique a URL e as permissões de compartilhamento. Erro: {e}")
+        st.error(f"Error loading spreadsheet '{sheet_url}'. Check the URL and share permissions. Error: {e}")
         return pd.DataFrame()
 
 @st.cache_data
 def get_all_articles(_client, sheet_url):
-    """Carrega artigos de todas as abas de uma planilha."""
+    """Loads and cleans articles from all sheets in a spreadsheet."""
     try:
-        # Note que o primeiro argumento do cache é o _client, 
-        # o sublinhado é uma convenção para dizer ao cache para não "olhar" para ele
         spreadsheet = _client.open_by_url(sheet_url)
         all_dfs = []
         for worksheet in spreadsheet.worksheets():
@@ -65,185 +60,301 @@ def get_all_articles(_client, sheet_url):
                 all_dfs.append(pd.DataFrame(data))
         
         if not all_dfs:
-            st.warning("Nenhum dado encontrado na planilha de origem.")
+            st.warning("No data found in the source spreadsheet.")
             return pd.DataFrame()
 
         full_df = pd.concat(all_dfs, ignore_index=True)
 
-        must_exist = ['Title', 'Abstract'] + COLUNAS_ORDENACAO_FALLBACK
+        # Clean 'Year' and 'Citations' columns, filling empty/invalid values with 0
+        for col in ['Year', 'Citations']:
+            if col in full_df.columns:
+                full_df[col] = pd.to_numeric(full_df[col], errors='coerce').fillna(0).astype(int)
+
+        must_exist = ['Title', 'Abstract'] + [col for col in COLUNAS_ORDENACAO_FALLBACK if col]
         missing_cols = [col for col in must_exist if col not in full_df.columns]
 
         if missing_cols:
-            st.error(f"As seguintes colunas obrigatórias não foram encontradas na planilha de origem: {missing_cols}")
+            st.error(f"The following required columns were not found in the source spreadsheet: {missing_cols}")
             return pd.DataFrame()
             
         return full_df.drop_duplicates(subset=["Title"])
     except Exception as e:
-        st.error(f"Erro ao carregar a planilha de origem '{sheet_url}'. Erro: {e}")
+        st.error(f"Error loading the source spreadsheet '{sheet_url}'. Error: {e}")
         return pd.DataFrame()
 
-# --- LÓGICA DE SELEÇÃO DE ARTIGOS ---
+def select_next_article(reviewer_cpf, df_articles, df_results):
+    """Decides which article to show to the reviewer from the provided DataFrame."""
+    if df_articles.empty:
+        return None
 
-def selecionar_proximo_artigo(avaliador_cpf, df_artigos, df_resultados):
-    """
-    Decide qual artigo mostrar para o avaliador.
-    Prioridade 1: Artigo avaliado por outro, mas não pelo atual.
-    Prioridade 2: Artigo nunca avaliado, seguindo a ordem de fallback.
-    """
-    # Titles já avaliados pelo usuário atual (incluindo pulados)
-    colunas_avaliador = [col for col in df_resultados.columns if col.startswith(f"{avaliador_cpf}/")]
-    if not colunas_avaliador:
-        titulos_avaliados_pelo_user = set()
+    reviewer_cols = [col for col in df_results.columns if col.startswith(f"{reviewer_cpf}/")]
+    if not reviewer_cols:
+        reviewed_by_user = set()
     else:
-        # Pega Title onde QUALQUER coluna deste avaliador não é nula
-        titulos_avaliados_pelo_user = set(df_resultados[df_resultados[colunas_avaliador].notna().any(axis=1)]['Title'])
+        reviewed_by_user = set(df_results[df_results[reviewer_cols].notna().any(axis=1)]['Title'])
 
-    # --- Lógica de Prioridade 1 ---
-    # Encontrar artigos avaliados por pelo menos uma pessoa
-    outros_avaliadores_cpfs = list(AVALIADORES.keys())
-    outros_avaliadores_cpfs.remove(avaliador_cpf)
+    other_reviewers_cpfs = list(AVALIADORES.keys())
+    other_reviewers_cpfs.remove(reviewer_cpf)
     
-    colunas_outros = []
-    for cpf in outros_avaliadores_cpfs:
-        colunas_outros.extend([col for col in df_resultados.columns if col.startswith(f"{cpf}/")])
+    other_cols = []
+    for cpf in other_reviewers_cpfs:
+        other_cols.extend([col for col in df_results.columns if col.startswith(f"{cpf}/")])
 
-    if colunas_outros:
-        # Title que já têm alguma avaliação de outros
-        avaliados_por_outros = set(df_resultados[df_resultados[colunas_outros].notna().any(axis=1)]['Title'])
-        # Interseção: avaliados por outros mas NÃO pelo usuário atual
-        para_avaliar_prioridade = list(avaliados_por_outros - titulos_avaliados_pelo_user)
-        if para_avaliar_prioridade:
-            # Seleciona um aleatoriamente para evitar que todos peguem o mesmo
-            titulo_selecionado = random.choice(para_avaliar_prioridade)
-            return df_artigos[df_artigos['Title'] == titulo_selecionado].iloc[0]
+    if other_cols:
+        reviewed_by_others = set(df_results[df_results[other_cols].notna().any(axis=1)]['Title'])
+        priority_to_review = list(reviewed_by_others - reviewed_by_user)
+        # Ensure priority articles are also within the filtered list
+        priority_to_review = [title for title in priority_to_review if title in df_articles['Title'].values]
+        if priority_to_review:
+            selected_title = random.choice(priority_to_review)
+            return df_articles[df_articles['Title'] == selected_title].iloc[0]
 
-    # --- Lógica de Prioridade 2 (Fallback) ---
-    titulos_ja_no_resultado = set(df_resultados['Title'])
-    titulos_virgens = set(df_artigos['Title']) - titulos_ja_no_resultado - titulos_avaliados_pelo_user
+    titles_in_results = set(df_results['Title'])
+    new_titles = set(df_articles['Title']) - titles_in_results - reviewed_by_user
     
-    if not titulos_virgens:
-        return None # Não há mais artigos para avaliar
+    if not new_titles:
+        return None
 
-    df_virgens = df_artigos[df_artigos['Title'].isin(list(titulos_virgens))]
+    df_new = df_articles[df_articles['Title'].isin(list(new_titles))]
     
-    # Ordenar de acordo com a configuração
-    df_ordenado = df_virgens.sort_values(
+    df_sorted = df_new.sort_values(
         by=COLUNAS_ORDENACAO_FALLBACK,
         ascending=ORDENS_ORDENACAO_FALLBACK
     )
     
-    return df_ordenado.iloc[0]
+    return df_sorted.iloc[0]
 
-
-# --- INTERFACE PRINCIPAL ---
 
 def main():
-    st.title("Plataforma de Avaliação de Artigos Científicos")
+    st.title("Scientific Article Evaluation Platform")
 
-    # --- TELA DE LOGIN ---
+    if 'editing_title' not in st.session_state:
+        st.session_state.editing_title = None
+
     if 'user_cpf' not in st.session_state:
-        st.subheader("Login do Avaliador")
-        cpf_input = st.text_input("Digite seu CPF (apenas números):")
-        nome_input = st.text_input("Digite seu Nome Completo:")
+        st.subheader("Reviewer Login")
+        cpf_input = st.text_input("Enter your CPF (numbers only):")
+        name_input = st.text_input("Enter your Full Name:")
         
-        if st.button("Entrar"):
-            if cpf_input in AVALIADORES and AVALIADORES[cpf_input].lower() == nome_input.lower():
+        if st.button("Login"):
+            if cpf_input in AVALIADORES and AVALIADORES[cpf_input].lower() == name_input.lower():
                 st.session_state.user_cpf = cpf_input
                 st.session_state.user_name = AVALIADORES[cpf_input]
-                st.rerun() # Recarrega a página para o estado "logado"
+                st.rerun()
             else:
-                st.error("CPF ou Nome inválido. Verifique os dados e tente novamente.")
-        st.stop() # Para a execução aqui até o login ser bem-sucedido
+                st.error("Invalid CPF or Name. Please check the data and try again.")
+        st.stop()
 
-    # --- PÁGINA DE AVALIAÇÃO (APÓS LOGIN) ---
-    avaliador_cpf = st.session_state.user_cpf
-    avaliador_nome = st.session_state.user_name
-    st.sidebar.success(f"Logado como: **{avaliador_nome}**")
-    if st.sidebar.button("Sair"):
+    reviewer_cpf = st.session_state.user_cpf
+    reviewer_name = st.session_state.user_name
+    st.sidebar.success(f"Logged in as: **{reviewer_name}**")
+    if st.sidebar.button("Logout"):
         del st.session_state.user_cpf
         del st.session_state.user_name
+        st.session_state.editing_title = None
         st.rerun()
 
-    # Carregar os dados
     client = get_gspread_client()
-    df_artigos = get_all_articles(client, SOURCE_SHEET_URL)
-    df_resultados = get_sheet_as_df(client, RESULTS_SHEET_URL)
+    df_articles = get_all_articles(client, SOURCE_SHEET_URL)
+    df_results = get_sheet_as_df(client, RESULTS_SHEET_URL)
 
-    # st.write("Colunas detectadas na planilha:", df_artigos.columns.tolist())
-
-    if df_artigos.empty:
-        st.warning("Não foi possível carregar os artigos. Verifique as configurações.")
+    if df_articles.empty:
+        st.warning("Could not load articles. Please check the configuration.")
         st.stop()
         
-    # Inicializa o df_resultados se estiver vazio
-    if df_resultados.empty:
-        df_resultados = pd.DataFrame(columns=["Title", "Abstract"])
+    if df_results.empty:
+        df_results = pd.DataFrame(columns=["Title", "Abstract"])
 
-    # Selecionar o próximo artigo
-    artigo_para_avaliar = selecionar_proximo_artigo(avaliador_cpf, df_artigos, df_resultados)
+    # --- FILTERS FOR NEW ARTICLES ---
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Filter New Articles")
 
-    if artigo_para_avaliar is None:
-        st.success("🎉 Parabéns! Não há mais artigos para você avaliar no momento.")
-        st.info("Aguarde novas avaliações de outros colegas ou a adição de novos artigos.")
+    min_year, max_year = int(df_articles['Year'].min()), int(df_articles['Year'].max())
+    min_cites, max_cites = int(df_articles['Citations'].min()), int(df_articles['Citations'].max())
+
+    year_range = st.sidebar.slider(
+        "Filter by Publication Year:",
+        min_value=min_year,
+        max_value=max_year,
+        value=(min_year, max_year)
+    )
+    citation_range = st.sidebar.slider(
+        "Filter by Number of Citations:",
+        min_value=min_cites,
+        max_value=max_cites,
+        value=(min_cites, max_cites)
+    )
+    df_articles_filtered = df_articles[
+        (df_articles['Year'] >= year_range[0]) &
+        (df_articles['Year'] <= year_range[1]) &
+        (df_articles['Citations'] >= citation_range[0]) &
+        (df_articles['Citations'] <= citation_range[1])
+    ]
+
+    # --- REVIEW PAST EVALUATIONS SECTION ---
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Review Past Evaluations")
+    
+    # ... (Rest of the sidebar logic for reviewing remains the same)
+    reviewer_cols = [col for col in df_results.columns if col.startswith(f"{reviewer_cpf}/")]
+    df_user_evaluations = pd.DataFrame()
+    if reviewer_cols:
+        df_user_evaluations = df_results[df_results[reviewer_cols].notna().any(axis=1)].copy()
+
+    if not df_user_evaluations.empty:
+        show_skipped_only = st.sidebar.checkbox("Show only skipped articles")
+
+        df_display = df_user_evaluations
+        if show_skipped_only:
+            reviewer_aspect_cols = [col for col in reviewer_cols if "Aspect" in col]
+            if reviewer_aspect_cols:
+                skipped_mask = df_display[reviewer_aspect_cols].eq("SKIPPED").any(axis=1)
+                df_display = df_display[skipped_mask]
+            else:
+                df_display = pd.DataFrame()
+
+        reviewer_date_col = f"{reviewer_cpf}/EvaluationDate"
+        titles_to_display = []
+        selectbox_label = "Filtered Articles:"
+        
+        if reviewer_date_col in df_display.columns:
+            date_series = pd.to_datetime(df_display[reviewer_date_col], errors='coerce')
+            valid_dates = date_series.dropna()
+            unique_days = sorted(valid_dates.dt.date.unique(), reverse=True)
+
+            if unique_days:
+                selected_day = st.sidebar.date_input(
+                    "Filter by evaluation date:",
+                    value=unique_days[0],
+                    min_value=unique_days[-1],
+                    max_value=unique_days[0]
+                )
+                day_mask = (date_series.dt.date == selected_day)
+                df_final_display = df_display[day_mask]
+                titles_to_display = df_final_display['Title'].tolist()
+                selectbox_label = f"Articles from {selected_day.strftime('%Y-%m-%d')}:"
+            else:
+                titles_to_display = df_display['Title'].tolist()
+                selectbox_label = "Filtered Articles (no date available):"
+        else:
+            titles_to_display = df_display['Title'].tolist()
+        
+        if titles_to_display:
+            article_to_review = st.sidebar.selectbox(
+                label=selectbox_label,
+                options=[""] + titles_to_display
+            )
+            if st.sidebar.button("Load for Editing"):
+                if article_to_review:
+                    st.session_state.editing_title = article_to_review
+                    st.rerun()
+                else:
+                    st.sidebar.warning("Please select an article from the list.")
+        else:
+            st.sidebar.info("No evaluations found for the selected filters.")
+    else:
+        st.sidebar.info("You have not completed any evaluations yet.")
+
+    # --- MAIN PAGE LOGIC ---
+    if st.session_state.editing_title:
+        st.info(f"You are editing the evaluation for: **{st.session_state.editing_title}**")
+        if st.button("⬅️ Back to Reviewing New Articles"):
+            st.session_state.editing_title = None
+            st.rerun()
+        
+        title_in_edit = st.session_state.editing_title
+        # Use the original df_articles to find the article to prevent filtering issues
+        article_to_evaluate = df_articles[df_articles['Title'] == title_in_edit].iloc[0]
+        
+        old_answers = {}
+        results_row_idx = df_results[df_results['Title'] == title_in_edit].index[0]
+        
+        for i, aspect in enumerate(ASPECTOS_AVALIACAO):
+            col_name = f"{reviewer_cpf}/Aspect {i+1}"
+            if col_name in df_results.columns:
+                old_answers[f"aspect_{i+1}"] = df_results.loc[results_row_idx, col_name]
+    else:
+        # Pass the newly filtered dataframe to the selection logic
+        article_to_evaluate = select_next_article(reviewer_cpf, df_articles_filtered, df_results)
+
+    if article_to_evaluate is None and not st.session_state.editing_title:
+        st.info("No articles match your current filter criteria, or all available articles have been reviewed.")
+        st.success("🎉 Congratulations! There are no new articles in the queue for you at this time.")
         st.stop()
 
-    # Exibir o artigo
     st.markdown("---")
-    st.header(artigo_para_avaliar['Title'])
-    with st.expander("Clique para ver o Abstract"):
-        st.write(artigo_para_avaliar['Abstract'])
+    st.header(article_to_evaluate['Title'])
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if 'Year' in article_to_evaluate and pd.notna(article_to_evaluate['Year']):
+            st.markdown(f"**Year:** {article_to_evaluate['Year']}")
+    with col2:
+        if 'Citations' in article_to_evaluate and pd.notna(article_to_evaluate['Citations']):
+            st.markdown(f"**Citations:** {article_to_evaluate['Citations']}")
+
+    with st.expander("Click to see the Abstract"):
+        st.write(article_to_evaluate['Abstract'])
     st.markdown("---")
     
-    st.subheader("Formulário de Avaliação")
-
-    # Usar um formulário para agrupar os inputs
+    st.subheader("Evaluation Form")
+    
     with st.form(key='evaluation_form'):
-        respostas = {}
-        for i, aspecto in enumerate(ASPECTOS_AVALIACAO):
-            respostas[f"aspecto_{i+1}"] = st.radio(
-                label=aspecto["pergunta"],
-                options=aspecto["opcoes"],
+        responses = {}
+        for i, aspect in enumerate(ASPECTOS_AVALIACAO):
+            default_index = 0
+            if st.session_state.editing_title:
+                old_answer = old_answers.get(f"aspect_{i+1}")
+                if old_answer in aspect["opcoes"]:
+                    default_index = aspect["opcoes"].index(old_answer)
+
+            responses[f"aspect_{i+1}"] = st.radio(
+                label=aspect["pergunta"],
+                options=aspect["opcoes"],
                 horizontal=True,
-                key=f"q_{i}"
+                key=f"q_{i}",
+                index=default_index
             )
         
-        # Botões de submissão e pulo dentro do formulário
-        col1, col2, _ = st.columns([1, 1, 5])
-        submitted = col1.form_submit_button("Salvar Avaliação")
-        skipped = col2.form_submit_button("Pular Artigo")
-
-    # --- LÓGICA DE SALVAMENTO ---
-    if submitted or skipped:
-        titulo_atual = artigo_para_avaliar['Title']
-        abstract_atual = artigo_para_avaliar['Abstract']
+        col1, col2, _ = st.columns([1.5, 1, 5])
+        btn_text = "Update Evaluation" if st.session_state.editing_title else "Save Evaluation"
+        submitted = col1.form_submit_button(btn_text)
         
-        # Verifica se o artigo já existe no df_resultados
-        if titulo_atual not in df_resultados['Title'].values:
-            # Adiciona nova linha se não existir
-            nova_linha = pd.DataFrame([{"Title": titulo_atual, "Abstract": abstract_atual}])
-            df_resultados = pd.concat([df_resultados, nova_linha], ignore_index=True)
+        skipped = False
+        if not st.session_state.editing_title:
+            skipped = col2.form_submit_button("Skip Article")
 
-        idx_linha = df_resultados[df_resultados['Title'] == titulo_atual].index[0]
+    if submitted or skipped:
+        current_title = article_to_evaluate['Title']
+        current_abstract = article_to_evaluate['Abstract']
+        
+        if current_title not in df_results['Title'].values:
+            new_row = pd.DataFrame([{"Title": current_title, "Abstract": current_abstract}])
+            df_results = pd.concat([df_results, new_row], ignore_index=True)
 
-        # Salva as respostas
-        for i, aspecto in enumerate(ASPECTOS_AVALIACAO):
-            nome_coluna = f"{avaliador_cpf}/Aspecto {i+1}"
-            valor = respostas[f"aspecto_{i+1}"] if submitted else "PULOU" # Marca como PULOU se o botão for clicado
-            df_resultados.loc[idx_linha, nome_coluna] = valor
+        row_idx = df_results[df_results['Title'] == current_title].index[0]
 
-        # Atualiza a planilha no Google Sheets
+        date_col = f"{reviewer_cpf}/EvaluationDate"
+        if date_col not in df_results.columns or pd.isna(df_results.loc[row_idx, date_col]):
+            df_results.loc[row_idx, date_col] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        for i, aspect in enumerate(ASPECTOS_AVALIACAO):
+            col_name = f"{reviewer_cpf}/Aspect {i+1}"
+            value = responses[f"aspect_{i+1}"] if submitted else "SKIPPED"
+            df_results.loc[row_idx, col_name] = value
+
         try:
-            worksheet_resultados = client.open_by_url(RESULTS_SHEET_URL).get_worksheet(0)
-            set_with_dataframe(worksheet_resultados, df_resultados, include_index=False)
-            st.success("Sua avaliação foi salva com sucesso!")
-            # Aguarda um pouco para o usuário ver a mensagem antes de recarregar
-            import time
-            time.sleep(1)
+            results_worksheet = client.open_by_url(RESULTS_SHEET_URL).get_worksheet(0)
+            set_with_dataframe(results_worksheet, df_results, include_index=False)
+            
+            success_msg = "Your evaluation was successfully updated!" if st.session_state.editing_title else "Your evaluation was successfully saved!"
+            st.success(success_msg)
+            st.session_state.editing_title = None
+            time.sleep(1.5)
             st.rerun()
 
         except Exception as e:
-            st.error(f"Ocorreu um erro ao salvar na planilha: {e}")
-
+            st.error(f"An error occurred while saving to the spreadsheet: {e}")
 
 if __name__ == "__main__":
     main()
