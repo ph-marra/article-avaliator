@@ -165,7 +165,20 @@ def main():
     if df_results.empty:
         df_results = pd.DataFrame(columns=["Title", "Abstract"])
 
-    # --- FILTERS FOR NEW ARTICLES ---
+    # --- CALCULATE USER STATS ---
+    reviewer_cols = [col for col in df_results.columns if col.startswith(f"{reviewer_cpf}/")]
+    df_user_evaluations = pd.DataFrame()
+    if reviewer_cols:
+        df_user_evaluations = df_results[df_results[reviewer_cols].notna().any(axis=1)].copy()
+    
+    total_reviewed_count = len(df_user_evaluations)
+    reviewed_by_user_set = set(df_user_evaluations['Title']) if not df_user_evaluations.empty else set()
+
+    # --- SIDEBAR: FILTERS AND STATS ---
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Reviewer Stats")
+    st.sidebar.metric("Total Articles Reviewed", f"{total_reviewed_count}")
+
     st.sidebar.markdown("---")
     st.sidebar.subheader("Filter New Articles")
 
@@ -190,17 +203,16 @@ def main():
         (df_articles['Citations'] >= citation_range[0]) &
         (df_articles['Citations'] <= citation_range[1])
     ]
+    
+    remaining_titles = set(df_articles_filtered['Title']) - reviewed_by_user_set
+    remaining_count = len(remaining_titles)
+    st.sidebar.metric("Remaining in Filtered Queue", f"{remaining_count}")
+
 
     # --- REVIEW PAST EVALUATIONS SECTION ---
     st.sidebar.markdown("---")
     st.sidebar.subheader("Review Past Evaluations")
     
-    # ... (Rest of the sidebar logic for reviewing remains the same)
-    reviewer_cols = [col for col in df_results.columns if col.startswith(f"{reviewer_cpf}/")]
-    df_user_evaluations = pd.DataFrame()
-    if reviewer_cols:
-        df_user_evaluations = df_results[df_results[reviewer_cols].notna().any(axis=1)].copy()
-
     if not df_user_evaluations.empty:
         show_skipped_only = st.sidebar.checkbox("Show only skipped articles")
 
@@ -263,7 +275,6 @@ def main():
             st.rerun()
         
         title_in_edit = st.session_state.editing_title
-        # Use the original df_articles to find the article to prevent filtering issues
         article_to_evaluate = df_articles[df_articles['Title'] == title_in_edit].iloc[0]
         
         old_answers = {}
@@ -274,7 +285,6 @@ def main():
             if col_name in df_results.columns:
                 old_answers[f"aspect_{i+1}"] = df_results.loc[results_row_idx, col_name]
     else:
-        # Pass the newly filtered dataframe to the selection logic
         article_to_evaluate = select_next_article(reviewer_cpf, df_articles_filtered, df_results)
 
     if article_to_evaluate is None and not st.session_state.editing_title:
