@@ -38,5 +38,5 @@ ASPECTOS_AVALIACAO = [
 # --- CONFIGURAÇÕES DA SELEÇÃO DE ARTIGOS ---
 # Usado quando nenhum artigo tem avaliações parciais.
 # Escolha uma coluna da sua planilha de artigos para ordenar.
-COLUNA_ORDENACAO_FALLBACK = "Year" # Pode ser "Título" ou outra coluna que exista
+COLUNA_ORDENACAO_FALLBACK = "Year" # Pode ser "Title" ou outra coluna que exista
 ORDEM_FALLBACK = "ASC" # Pode ser "ASC" para ascendente ou "DESC" para descendente
